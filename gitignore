@@ -1,0 +1,31 @@
+# ===== MATLAB temp/backup/build artifacts =====
+*.asv
+*.m~*
+*.mex*
+*.slprj/
+*.slxc
+*.mdl.autosave
+*.autosave
+*.mltbx
+*.prj
+
+# ===== Large/binary files (adjust if you really want to track them) =====
+*.mat
+*.zip
+
+# ===== Run outputs (figures, csv, models, logs) =====
+results/models
+logs/
+
+
+# ===== OS / Editor noise =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Tips:
+# - If you want to keep figure PNGs, remove 'results/' above and ignore finer-grained paths instead, e.g.:
+#   results/models/
+#   results/*.csv
+# - If you decide to version small .mat files, delete the '*.mat' rule above.
