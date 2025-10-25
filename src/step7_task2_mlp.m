@@ -280,3 +280,20 @@ function S = softmax(Z)
     S = exp(Z);
     S = S ./ sum(S,1);
 end
+
+
+function P = mlp_forward(x, params)
+% MLP 前向预测（单样本）
+% 输入: x[D×1], params.W/b
+    L = numel(params.W);
+    A = x;
+    for l=1:L-1
+        Z = params.W{l} * A + params.b{l};
+        A = max(0, Z); % ReLU
+    end
+    ZL = params.W{L} * A + params.b{L};
+    ZL = ZL - max(ZL);
+    P  = exp(ZL); 
+    P  = P / sum(P);
+end
+
