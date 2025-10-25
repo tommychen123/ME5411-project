@@ -1,76 +1,47 @@
 function state = step7_task1_cnn(state, cfg)
-% Train a compact CNN and evaluate on validation set.
+% STEP7_TASK1_CNN (shim) — 使用你自己的 cnn.m 训练脚本与模型文件
+% - 若 cfg.flags.trainCNN==true：调用 cnn.m 训练，随后加载 CNN_latest.mat
+% - 若 cfg.flags.trainCNN==false：直接从 ../results/models/CNN_latest.mat 加载
+% - 把 net / classes / inputSize 写入 state.step7.cnn，供 apply 阶段使用
 
-    assert(isfield(state,'step7') && isfield(state.step7,'imdsTrain'), ...
-        'Run step7_dataset first.');
+    % 路径
+    resultsDir = fullfile('..','results');
+    modelDir   = fullfile(resultsDir,'models');
+    if ~exist(modelDir,'dir'), mkdir(modelDir); end
+    modelFile  = fullfile(modelDir,'CNN_useful_1.mat');
 
-    imdsTrain = state.step7.imdsTrain;
-    imdsVal   = state.step7.imdsVal;
-    classes   = state.step7.classes;
-    inputSize = state.step7.inputSize;  % e.g., [32 32 1]
-
-    % datastores with resize + grayscale
-    augTrain = augmentedImageDatastore(inputSize(1:2), imdsTrain, ...
-        'ColorPreprocessing','rgb2gray');
-    augVal   = augmentedImageDatastore(inputSize(1:2), imdsVal, ...
-        'ColorPreprocessing','rgb2gray');
-
-    % LeNet-like tiny CNN
-    numClasses = numel(classes);
-    % LeNet-like tiny CNN (one layer per line; no commas)
-numClasses = numel(classes);
-layers = [
-    imageInputLayer(inputSize,'Normalization','zerocenter')  % 若版本支持也可用 'zscore'
-    convolution2dLayer(3,32,'Padding','same')
-    batchNormalizationLayer
-    reluLayer
-    maxPooling2dLayer(2,'Stride',2)
-
-    convolution2dLayer(3,64,'Padding','same')
-    batchNormalizationLayer
-    reluLayer
-    maxPooling2dLayer(2,'Stride',2)
-
-    convolution2dLayer(3,128,'Padding','same')
-    batchNormalizationLayer
-    reluLayer
-
-    fullyConnectedLayer(256)
-    reluLayer
-    dropoutLayer(0.3)
-
-    fullyConnectedLayer(numClasses)
-    softmaxLayer
-    classificationLayer
-];
-
-
-    opts = trainingOptions('adam', ...
-        'MiniBatchSize', 64, ...
-        'MaxEpochs', 15, ...
-        'Shuffle','every-epoch', ...
-        'ValidationData', augVal, ...
-        'ValidationFrequency', 50, ...
-        'Verbose', false);
-
-    t0 = tic;
-    net = trainNetwork(augTrain, layers, opts);
-    trainTime = toc(t0);
-
-    % Validation accuracy
-    YVal = imdsVal.Labels;
-    YPred = classify(net, augVal);
-    valAcc = mean(YPred == YVal);
-
-    % Confusion chart
-    if isfield(cfg,'paths') && isfield(cfg.paths,'figures')
-        f = figure('Name','Step7 - CNN Confusion','Color','w');
-        confusionchart(YVal, YPred,'RowSummary','row-normalized','ColumnSummary','column-normalized');
-        exportgraphics(f, fullfile(cfg.paths.figures,'step7_cnn_confusion.png'), 'Resolution',150);
-        close(f);
+    % 需要训练时，直接跑你的 cnn.m（脚本）
+    if isfield(cfg,'flags') && isfield(cfg.flags,'trainCNN') && cfg.flags.trainCNN
+        fprintf('[Step7/CNN] Running your cnn.m to train...\n');
+        run(fullfile(pwd,'cnn.m'));   % 你的脚本会把模型存到 modelFile
+    else
+        fprintf('[Step7/CNN] Skipping training; will load existing model.\n');
     end
 
-    % save to state
-    state.step7.cnn = struct('net',net,'valAcc',valAcc,'trainTime',trainTime);
-    fprintf('[Step7/CNN] Val Acc = %.3f, Train Time = %.2fs\n', valAcc, trainTime);
+    % 加载模型
+    assert(exist(modelFile,'file')==2, ...
+        'Model not found: %s. 请先运行 cnn.m 训练一次。', modelFile);
+    S = load(modelFile);  % 期望含有: net, classes, inputSizeSave, useCLAHE, valAcc, trainTime(可选)
+
+    % 映射到 pipeline 需要的字段
+    inputSize = S.inputSizeSave;         % e.g. [128 128 1]
+    classes   = S.classes;
+    net       = S.net;
+    valAcc    = getfield_or(S,'valAcc',NaN);
+    trainTime = getfield_or(S,'trainTime',NaN);
+
+    % 写入 state（与 apply 端对齐的命名）
+    state.step7.cnn = struct( ...
+        'net',       net, ...
+        'classes',   {classes}, ...
+        'inputSize', inputSize, ...
+        'valAcc',    valAcc, ...
+        'trainTime', trainTime);
+
+    fprintf('[Step7/CNN] Loaded model. ValAcc=%.2f%% | inputSize=[%d %d %d]\n', ...
+        100*valAcc, inputSize(1), inputSize(2), numel(inputSize)>=3*inputSize(3));
+end
+
+function v = getfield_or(S, f, dv)
+    if isfield(S,f), v = S.(f); else, v = dv; end
 end

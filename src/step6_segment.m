@@ -5,7 +5,7 @@ function state = step6_segment(state, cfg)
 % Inputs:
 %   state:
 %     state.roi         : grayscale ROI (double in [0,1]) for overlay/crops
-%     state.binarize.bw : logical ROI binary (foreground = true)
+%     state.binarize.bw : logical ROI binary (foreground = true,通常白字黑底)
 %   cfg.segment (optional):
 %     .connectivity : '8' (default) | '4'
 %     .preCloseIters: integer >=0, 3x3 closing iterations before CC (default 0)
@@ -28,19 +28,21 @@ function state = step6_segment(state, cfg)
 %     .targetK           : desired total boxes; 0/[] to disable (default 10)
 %
 % Outputs:
-%   state.segment.boxes     : Nx4 [x y w h], left->right
-%   state.segment.cropsGray : 1xN gray crops
-%   state.segment.cropsBW   : 1xN binary crops
+%   state.segment.boxes      : Nx4 [x y w h], left->right
+%   state.segment.cropsGray  : 1xN gray crops
+%   state.segment.cropsBW    : 1xN binary crops（原始极性，通常白字黑底）
+%   state.segment.cropsBin   : 1xN binary crops（已反相为白底黑字，供CNN直接用）
+%   state.segment.bwFiltered : 最终掩膜（只保留框内前景）
 %
 % Saves:
-%   step6_segment_boxes.png, step6_chars_grid.png
+%   step6_segment_boxes.png, step6_chars_grid.png, step6_final_bw.png
 
     assert(isfield(state,'binarize') && isfield(state.binarize,'bw'), ...
         'Missing state.binarize.bw (run step4 first).');
     assert(isfield(state,'roi'), 'Missing state.roi (from step3).');
 
     I  = state.roi;
-    BW = logical(state.binarize.bw);
+    BW = logical(state.binarize.bw);      % 前景=1（通常白字黑底）
     [H,W] = size(BW);
     roiArea = H*W;
 
@@ -99,7 +101,7 @@ function state = step6_segment(state, cfg)
         end
     end
     if isempty(boxes)
-        state.segment = struct('boxes',[],'cropsGray',{{}},'cropsBW',{{}});
+        state.segment = struct('boxes',[],'cropsGray',{{}},'cropsBW',{{}},'cropsBin',{{}},'bwFiltered',[]);
         warn_and_dump_empty(cfg.paths.figures, I, BW);
         return;
     end
@@ -122,15 +124,34 @@ function state = step6_segment(state, cfg)
     % ---------- left->right & crops ----------
     [~,ord] = sort(boxes(:,1),'ascend'); boxes = boxes(ord,:);
     N = size(boxes,1);
-    cropsBW = cell(1,N); cropsGray = cell(1,N);
+
+    % 构造与 Step6 一致的“最终掩膜”：仅保留框内的前景
+    BWfinal = false(H,W);
     for i = 1:N
         b = boxes(i,:);
-        cropsBW{i}   = BW(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
+        sub = BW(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
+        BWfinal(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1) = sub | BWfinal(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
+    end
+
+    % 生成小块（两套：原始极性 + 反相为白底黑字）
+    cropsBW  = cell(1,N);  % 原始极性，通常白字黑底（前景=1）
+    cropsBin = cell(1,N);  % 已反相：白底黑字（背景=1，字=0）
+    cropsGray = cell(1,N);
+    for i = 1:N
+        b = boxes(i,:);
+        bin = BW(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
+        cropsBW{i}  = bin;       % 保留原始二值
+        cropsBin{i} = ~bin;      % 反相成白底黑字（给 CNN 用）
         cropsGray{i} = I( b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
     end
 
     % ---------- save to state ----------
-    state.segment = struct('boxes',boxes,'cropsGray',{cropsGray},'cropsBW',{cropsBW});
+    state.segment = struct( ...
+        'boxes',      boxes, ...
+        'cropsGray',  {cropsGray}, ...
+        'cropsBW',    {cropsBW}, ...     % 兼容：原始极性
+        'cropsBin',   {cropsBin}, ...    % ★ 白底黑字（建议CNN使用）
+        'bwFiltered',  BWfinal);         % ★ 最终掩膜（仅保留框内）
 
     % ---------- visualization ----------
     f1 = figure('Name','Step6 - Boxes','Color','w');
@@ -152,30 +173,51 @@ function state = step6_segment(state, cfg)
     safe_save_fig(f2, fullfile(cfg.paths.figures,'step6_chars_grid.png'), 150);
     close(f2);
 
+    % 额外导出 Step6 最终掩膜（便于核对 Step7 输入一致性）
+    f3 = figure('Name','Step6 - Final BW','Color','w');
+    imshow(BWfinal,'Border','tight'); title('Step6 Final BW (kept boxes only)');
+    safe_save_fig(f3, fullfile(cfg.paths.figures,'step6_final_bw.png'), 150);
+    close(f3);
+
     fprintf('[Step6] Done. %d segments kept.\n', N);
+
+        % —— 新增：导出单个字符（白底黑字） —— 
+    outDir = fullfile(cfg.paths.figures, 'step6_crops_bin');
+    if ~exist(outDir,'dir'), mkdir(outDir); end
+    for i=1:N
+        % 255白、0黑：与 CNN 预期一致
+        imwrite(uint8(cropsBin{i}*255), fullfile(outDir, sprintf('char_%02d.png', i)));
+    end
+
 end
 
 % ================= helpers =================
 function S = set_default(S, f, v)
-    if ~isfield(S,f), S.(f)=v; end
+% local helper: if field missing or empty, set default
+    if ~isfield(S, f) || isempty(S.(f)), S.(f) = v; end
 end
 
 function B = morph_close(B, iters)
-    for t = 1:iters
-        D = conv2(double(B), ones(3), 'same') > 0;
-        B = conv2(double(D), ones(3), 'same') == 9;
+% 3x3 形态学闭运算（先膨胀再腐蚀），toolbox-free
+    B = logical(B);
+    for t = 1:max(1, round(iters))
+        D = conv2(double(B), ones(3), 'same') > 0;    % 膨胀
+        B = conv2(double(D), ones(3), 'same') == 9;   % 腐蚀
     end
     B = logical(B);
 end
 
 function B = morph_erode(B, iters)
-    for t = 1:iters
+% 3x3 形态学腐蚀，toolbox-free
+    B = logical(B);
+    for t = 1:max(1, round(iters))
         B = conv2(double(B), ones(3), 'same') == 9;
     end
     B = logical(B);
 end
 
 function [labels, stats] = label_cc(BW, neigh)
+% BFS 连通域标记，返回 labels 与 stats(area, bbox)
     [H,W] = size(BW);
     labels = zeros(H,W,'uint32');
     visited = false(H,W);
@@ -249,9 +291,7 @@ end
 
 function safe_save_fig(figHandle, outPath, dpi)
     if nargin<3 || isempty(dpi), dpi = 150; end
-    if ~ishandle(figHandle) || ~strcmp(get(figHandle,'Type'),'figure')
-        figHandle = gcf;
-    end
+    if ~ishandle(figHandle) || ~strcmp(get(figHandle,'Type'),'figure'), figHandle = gcf; end
     drawnow;
     try
         if exist('exportgraphics','file')==2
@@ -269,7 +309,7 @@ function safe_save_fig(figHandle, outPath, dpi)
     end
 end
 
-% ------------ NEW: split helpers ------------
+% ------------ split helpers ------------
 function boxes = split_overwide_boxes(BW, boxes, S)
 % Split boxes with width >> median width using vertical projection valleys
     if isempty(boxes), return; end
@@ -310,10 +350,9 @@ function parts = split_box_once(BW, b, pad, minChildW)
 % Split one box at deepest valley of column foreground sum (toolbox-free)
     parts = [];
     sub = BW(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
-    [Hs, Ws] = size(sub);
+    [~, Ws] = size(sub);
     col = sum(sub, 1);                      % foreground count per column
     win = max(3, round(0.06 * Ws));         % smoothing window ~6% width
-    % simple moving average smoothing via conv
     k = ones(1,win)/win;
     colS = conv(col, k, 'same');
 
