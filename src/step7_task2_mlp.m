@@ -1,20 +1,29 @@
 function state = step7_task2_mlp(state, cfg)
-% STEP7_TASK2_NON_CNN - 非CNN的多层感知机（MLP）字符分类
-% 要求数据结构：
-%   cfg.file.datasetRoot  -> 数据集根目录（类为子文件夹）
-%   例如: ../data/p_dataset_26/
-%           0/*.png  4/*.png  7/*.png  8/*.png  A/*.png  D/*.png  H/*.png
+% STEP7_TASK2_MLP
+% Purpose:
+%   - Train a non-CNN multilayer perceptron (MLP) character classifier.
+%   - Dataset is folder-structured (one subfolder per class).
 %
-% 输出：
-%   ../results/models/MLP_latest.mat  (params, classes, inputSize, mu, sigma, valAcc, trainTime)
-%   ../results/figures/mlp_curves.png (loss/acc 曲线)
+% Inputs:
+%   cfg.file.datasetRoot : dataset root (classes as subfolders)
+%                          e.g. ../data/dataset_2025/
+%                               0/*.png 4/*.png 7/*.png 8/*.png A/*.png D/*.png H/*.png
 %
-% state.step7.task2_mlp = struct('params',..., 'classes',..., 'inputSize',..., 'valAcc',..., 'trainTime',...)
+% Outputs:
+%   Saves model to:   ../results/models/MLP_latest.mat
+%                     (params, classes, inputSize, mu, sigma, valAcc, trainTime, useCLAHE)
+%   Saves curves to:  ../results/figures/mlp_curves.png
+%
+% Side effects (state):
+%   state.step7.task2_mlp = struct('params',..., 'classes',..., 'inputSize',...,
+%                                  'valAcc',..., 'trainTime',..., 'useCLAHE',...,
+%                                  'mu',..., 'sigma',...)
 
-    %% ---------- 配置 ----------
-    rng(42);                             % 可复现
+    %% ---------- Configuration ----------
+    rng(42); % reproducibility
+
     datasetRoot = fullfile('..','data','dataset_2025');
-    assert(exist(datasetRoot,'dir')==7, '数据集不存在: %s', datasetRoot);
+    assert(exist(datasetRoot,'dir')==7, 'Dataset not found: %s', datasetRoot);
 
     resultsDir = fullfile(cfg.paths.results);
     modelDir   = fullfile(resultsDir, 'models');
@@ -23,46 +32,46 @@ function state = step7_task2_mlp(state, cfg)
     if ~exist(figDir,'dir'),   mkdir(figDir);   end
     modelFile  = fullfile(modelDir, 'MLP_latest.mat');
 
-    % 预处理相关（与整个工程的风格一致）
-    inputSize  = [128 128 1];   % 数据本身就是 128x128；保持一致
-    useCLAHE   = true;          % 适度增强细节（和你CNN一致）
-    valSplit   = 0.75;          % 按你学长代码的风格：75% 训练 / 25% 验证
+    % Preprocessing (consistent with the CNN pipeline)
+    inputSize  = [128 128 1]; % keep 128x128 grayscale
+    useCLAHE   = true;        % mild contrast enhancement
+    valSplit   = 0.75;        % 75% train / 25% val
 
-    % 模型/训练超参（稳泛化）
-    layers     = [prod(inputSize(1:2)) 1024 64];  % 隐层(1024, 64) + 输出层会按 numClasses 自动加
-    epochs     = 200;              % 足够收敛
-    batchSize  = 128;              % mini-batch
-    lr         = 0.02;             % 学习率（SGD）
-    l2         = 1e-4;             % L2 权重衰减（仅W）
-    printFreq  = 5;                % 每多少个epoch打印/记录一次
+    % Model / training hyperparameters
+    layers     = [prod(inputSize(1:2)) 1024 64]; % hidden (1024,64); output added by numClasses
+    epochs     = 200;
+    batchSize  = 128;
+    lr         = 0.02;
+    l2         = 1e-4;        % L2 weight decay on W only
+    printFreq  = 5;
 
-    %% ---------- 读数据（统一预处理） ----------
+    %% ---------- Load data (unified preprocessing) ----------
     rf = @(fn) reader_preproc(fn, inputSize(1:2), useCLAHE);
     imdsAll = imageDatastore(datasetRoot, 'IncludeSubfolders', true, ...
         'LabelSource', 'foldernames', 'ReadFcn', rf);
 
-    % 划分训练/验证
+    % Split into train/val
     [imdsTrain, imdsVal] = splitEachLabel(imdsAll, valSplit, 'randomized');
     classes    = categories(imdsTrain.Labels);
     numClasses = numel(classes);
     fprintf('[task2-mlp] %d train / %d val / %d classes\n', numel(imdsTrain.Files), numel(imdsVal.Files), numClasses);
 
-    % 读成矩阵（展平特征: D x N）
+    % Read to matrices (flattened features: D x N)
     Xtr = read_and_flatten(imdsTrain, inputSize);   % D x Ntr
     ytr = onehot(imdsTrain.Labels, classes);        % C x Ntr
     Xva = read_and_flatten(imdsVal,   inputSize);   % D x Nva
     yva = onehot(imdsVal.Labels, classes);          % C x Nva
 
-    % 标准化（按训练集统计）
+    % Standardize (using train statistics)
     mu    = mean(Xtr, 2);
     sigma = std(Xtr, 0, 2) + 1e-6;
     Xtr   = (Xtr - mu) ./ sigma;
     Xva   = (Xva - mu) ./ sigma;
 
-    %% ---------- 初始化 MLP ----------
-    params = init_mlp([layers numClasses]);  % 自动拼上输出层
+    %% ---------- Initialize MLP ----------
+    params = init_mlp([layers numClasses]); % append output layer
 
-    %% ---------- 训练（mini-batch SGD + ReLU + SoftmaxCE） ----------
+    %% ---------- Train (mini-batch SGD + ReLU + Softmax CE) ----------
     nTr = size(Xtr, 2);
     itersPerEpoch = ceil(nTr / batchSize);
     history = struct('epoch',[],'trLoss',[],'trAcc',[],'vaLoss',[],'vaAcc',[]);
@@ -70,7 +79,7 @@ function state = step7_task2_mlp(state, cfg)
     fprintf('[task2-mlp] Training ...\n');
     t0 = tic;
     for ep = 1:epochs
-        % 打乱
+        % Shuffle
         idx = randperm(nTr);
         Xtr = Xtr(:, idx);  ytr = ytr(:, idx);
 
@@ -78,24 +87,24 @@ function state = step7_task2_mlp(state, cfg)
             s = (it-1)*batchSize + 1;  e = min(it*batchSize, nTr);
             Xb = Xtr(:, s:e);  Yb = ytr(:, s:e);
 
-            % 前向
+            % Forward
             [out, caches] = forward_mlp(Xb, params);
-            % 损失（CE + L2）
+            % Loss (CE + L2)
             [loss, dZL] = loss_ce(out, Yb);
-            % 反传
+            % Backward
             grads = backward_mlp(dZL, caches, params);
-            % L2
+            % L2 on W
             for li=1:numel(params.W)
                 grads.W{li} = grads.W{li} + l2 * params.W{li};
             end
-            % 更新（SGD）
+            % SGD update
             for li=1:numel(params.W)
                 params.W{li} = params.W{li} - lr * grads.W{li};
                 params.b{li} = params.b{li} - lr * grads.b{li};
             end
         end
 
-        % 记录/评估
+        % Logging / evaluation
         if mod(ep, printFreq)==0 || ep==1 || ep==epochs
             [trLoss, trAcc] = evaluate(Xtr, ytr, params);
             [vaLoss, vaAcc] = evaluate(Xva, yva, params);
@@ -110,11 +119,11 @@ function state = step7_task2_mlp(state, cfg)
     end
     trainTime = toc(t0);
 
-    % 最终验证
+    % Final validation
     [~, valAcc] = evaluate(Xva, yva, params);
     fprintf('[task2-mlp] Val acc: %.2f%%  (time=%.1fs)\n', 100*valAcc, trainTime);
 
-    %% ---------- 曲线图 ----------
+    %% ---------- Curves ----------
     try
         f = figure('Color','w','Position',[100 100 780 320]);
         subplot(1,2,1); plot(history.epoch, history.trLoss, '-o'); hold on; plot(history.epoch, history.vaLoss, '-o'); grid on;
@@ -125,11 +134,11 @@ function state = step7_task2_mlp(state, cfg)
     catch
     end
 
-    %% ---------- 保存模型 ----------
+    %% ---------- Save model ----------
     save(modelFile, 'params','classes','inputSize','useCLAHE','mu','sigma','valAcc','trainTime');
     fprintf('[task2-mlp] Model saved: %s\n', modelFile);
 
-    %% ---------- 更新 state ----------
+    %% ---------- Update state ----------
     if ~isfield(state,'step7'), state.step7 = struct(); end
     state.step7.task2_mlp = struct('params',params,'classes',{classes}, ...
         'inputSize',inputSize,'valAcc',valAcc,'trainTime',trainTime,'useCLAHE',useCLAHE, ...
@@ -139,7 +148,7 @@ end
 %% ======================= Helper Functions =======================
 
 function I = reader_preproc(fn, outSz, useCLAHE)
-% 灰度 -> single[0,1] -> (可选)CLAHE -> 白底letterbox到 outSz
+% Grayscale -> single [0,1] -> optional CLAHE -> white letterbox to outSz
     I = imread(fn);
     if size(I,3)>1, I = rgb2gray(I); end
     I = im2single(I);
@@ -161,12 +170,12 @@ function Iout = letterbox_white(I, outSz, useCLAHE)
     y1 = min(S, y0 + nh - 1);
     x1 = min(T, x0 + nw - 1);
     Ir = Ir(1:(y1-y0+1), 1:(x1-x0+1));
-    Iout = ones(S,T,'single');       % 白底
-    Iout(y0:y1, x0:x1) = Ir;         % 居中
+    Iout = ones(S,T,'single'); % white background
+    Iout(y0:y1, x0:x1) = Ir;   % centered
 end
 
 function X = read_and_flatten(imds, inputSize)
-% 读取datastore为 D x N 的列向量特征
+% Read datastore into D x N column-major features
     D = prod(inputSize(1:2));
     N = numel(imds.Files);
     X = zeros(D, N, 'single');
@@ -194,10 +203,10 @@ function params = init_mlp(layerSizes)
         n_in  = layerSizes(l);
         n_out = layerSizes(l+1);
         if l < L
-            % He init for ReLU
+            % He init for ReLU layers
             params.W{l} = randn(n_out, n_in, 'single') * sqrt(2/n_in);
         else
-            % Xavier for softmax
+            % Xavier for the softmax layer
             params.W{l} = randn(n_out, n_in, 'single') * sqrt(1/n_in);
         end
         params.b{l} = zeros(n_out, 1, 'single');
@@ -205,7 +214,7 @@ function params = init_mlp(layerSizes)
 end
 
 function [out, caches] = forward_mlp(X, params)
-% 隐层 ReLU，最后 softmax
+% Hidden layers: ReLU, Output: softmax
     L = numel(params.W);
     A = X;
     caches = struct('Z',{});
@@ -213,7 +222,7 @@ function [out, caches] = forward_mlp(X, params)
     for l = 1:L-1
         Z = params.W{l} * A + params.b{l};
         A = relu(Z);
-        caches(l).Z = Z;       %#ok<*AGROW>
+        caches(l).Z = Z;
         if l == 1
             caches(l).Aprev = X;
         else
@@ -222,7 +231,7 @@ function [out, caches] = forward_mlp(X, params)
         caches(l).A = A;
     end
 
-    % 输出层
+    % Output layer
     ZL = params.W{L} * A + params.b{L};
     out = softmax(ZL);
     caches(L).Z = ZL;
@@ -230,37 +239,33 @@ function [out, caches] = forward_mlp(X, params)
     caches(L).A = out;
 end
 
-
 function [loss, dZL] = loss_ce(AL, Y)
-% 多类交叉熵（softmax + CE）：loss = - mean sum (y .* log(al))
+% Multiclass cross-entropy with softmax activations
     eps_ = 1e-12;
     loss = - mean( sum(single(Y) .* log(single(AL) + eps_), 1) );
-    dZL  = AL - Y;  % softmax+CE 的标准梯度
+    dZL  = AL - Y;  % softmax + CE gradient
 end
 
 function grads = backward_mlp(dZL, caches, params)
-% 输出层梯度已给 dZL；隐层用 ReLU 反传
+% Backprop: output gradient is given; hidden layers use ReLU'
     L = numel(params.W);
     grads.W = cell(1,L); grads.b = cell(1,L);
 
-    % 输出层
-    Aprev = caches(L).Aprev;   % (H x N)
+    % Output layer
+    Aprev = caches(L).Aprev;
     N = size(Aprev,2);
     grads.W{L} = (1/N) * dZL * Aprev';
     grads.b{L} = (1/N) * sum(dZL, 2);
     dA = params.W{L}' * dZL;
 
-    % 隐层
+    % Hidden layers
     for l=L-1:-1:1
-        Z   = caches(l).Z;
+        Z     = caches(l).Z;
         Aprev = caches(l).Aprev;
         N = size(Aprev,2);
         dZ  = dA .* (Z > 0);                 % ReLU'
         grads.W{l} = (1/N) * dZ * Aprev';
         grads.b{l} = (1/N) * sum(dZ, 2);
-        if l>1
-            Aprevprev = caches(l-1).Aprev; %#ok<NASGU>
-        end
         dA  = params.W{l}' * dZ;
     end
 end
@@ -276,15 +281,14 @@ end
 %% ---------- simple activations ----------
 function A = relu(Z), A = max(0, Z); end
 function S = softmax(Z)
-    Z = Z - max(Z,[],1);  % 数值稳定
+    Z = Z - max(Z,[],1);  % numerical stability
     S = exp(Z);
     S = S ./ sum(S,1);
 end
 
-
 function P = mlp_forward(x, params)
-% MLP 前向预测（单样本）
-% 输入: x[D×1], params.W/b
+% Single-sample forward prediction
+% x: D x 1
     L = numel(params.W);
     A = x;
     for l=1:L-1
@@ -293,7 +297,6 @@ function P = mlp_forward(x, params)
     end
     ZL = params.W{L} * A + params.b{L};
     ZL = ZL - max(ZL);
-    P  = exp(ZL); 
+    P  = exp(ZL);
     P  = P / sum(P);
 end
-

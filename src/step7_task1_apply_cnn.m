@@ -1,10 +1,41 @@
-function state = step7_task1_apply_cnn(state, cfg)
 % STEP7_TASK1_APPLY_CNN
-% 推理阶段：一次性白边缩放 + 居中；对 {A,H,4} 且 CNN 置信<0.70 时用 MLP 覆盖
-% 作者: ChatGPT 改写 2025
+% Purpose:
+%   - Apply the trained CNN to per-character crops produced by Step 6.
+%   - Use a single-pass letterbox preprocess (white background + centered).
+% Inputs:
+%   state : struct carrying pipeline context
+%           - state.segment.cropsBin : 1xN binary crops (white background, black glyph)
+%           - state.step7.cnn.net    : trained CNN network
+%           - state.step7.cnn.classes: class names
+%           - state.step7.cnn.inputSize : [H W C] expected by CNN
+%           - state.step7.cnn.useCLAHE  : (optional) logical
+%   cfg   : struct with configuration and paths
+%           - cfg.paths.figures, cfg.paths.results, cfg.paths.models
+%
+% Outputs (added to 'state'):
+%   state.step7.task1_apply.labels : Nx1 string labels (after possible MLP override)
+%   state.step7.task1_apply.scores : Nx1 confidence scores
+%   state.step7.task1_apply.N      : number of crops
+%   state.step7.task1_apply.*      : metadata (padScale, useCLAHE, confThr, targetSet)
+%
+% Saved artifacts:
+%   - results/step7_task1_cnn_preds.csv                (if you write table elsewhere)
+%   - results/figures/step7_task1_cnn_inputs_grid.png  (letterboxed inputs + final labels)
+%   - results/figures/dbg_apply_cnn/cmp/*.png          (debug inputs)
+%
+% Notes:
+%   - Single-pass preprocess only (no retry / no multi-scale).
+%   - MLP override is limited to {A, H, 4} when CNN confidence < 0.70.
+%   - CLAHE is optional and controlled by state.step7.cnn.useCLAHE.
+%
+% Config knobs (inside this file):
+%   - padScale_main : letterbox scale factor (default 1.5)
+%   - targetSet     : classes eligible for MLP override (default ["A","H","4"])
 
-    assert(isfield(state,'segment'),'缺少 step6 输出');
-    assert(isfield(state.step7,'cnn') && isfield(state.step7.cnn,'net'),'缺少 CNN 模型');
+function state = step7_task1_apply_cnn(state, cfg)
+
+    assert(isfield(state,'segment'), 'Missing step6 output.');
+    assert(isfield(state.step7,'cnn') && isfield(state.step7.cnn,'net'), 'Missing CNN model.');
 
     net       = state.step7.cnn.net;
     classes   = state.step7.cnn.classes;
@@ -14,28 +45,28 @@ function state = step7_task1_apply_cnn(state, cfg)
     useCLAHE  = true;
     if isfield(state.step7.cnn,'useCLAHE'), useCLAHE = state.step7.cnn.useCLAHE; end
 
-    % —— 关键参数（仅一次缩放，不重试）——
-    padScale_main = 1.5;           % 白边缩放比例（一次性）
-    confThr       = 0.70;          % 对 {A,H,4} 且置信低于此阈值，用 MLP 覆盖
-    targetSet     = ["A","H","4"]; % 仅对这三类启用 MLP 覆盖
+    % ---- key params (single resize; no retries) ----
+    padScale_main = 1.5;                 % letterbox scale (one pass)
+    confThr       = 0.70;                % MLP override threshold for {A,H,4}
+    targetSet     = ["A","H","4"];       % classes eligible for MLP override
 
-    % ---------------- 读取 step6 小块 ----------------
+    % ---- read step6 crops ----
     if isfield(state.segment,'cropsBin') && ~isempty(state.segment.cropsBin)
-        crops = state.segment.cropsBin;  % 白底黑字
+        crops = state.segment.cropsBin;  % white background, black glyph
         src = 'cropsBin';
     else
-        error('未找到 state.segment.cropsBin，请确认 step6_segment 已运行');
+        error('state.segment.cropsBin not found. Ensure step6_segment ran.');
     end
     N = numel(crops);
-    fprintf('[apply] 使用 %d 个字符块 (白底黑字)，useCLAHE=%d\n', N, useCLAHE);
+    fprintf('[apply] %d character crops (white bg, black glyph), useCLAHE=%d\n', N, useCLAHE);
 
-    % ---------------- 尝试加载 MLP（可选兜底） ----------------
+    % ---- try load MLP (optional fallback) ----
     mlpAvailable = false;
     mlp = struct();
     try
         modelsDir = fullfile('..','results','models');
         if ~exist(modelsDir,'dir')
-            modelsDir = fullfile('..','rerults','models'); % 容错
+            modelsDir = fullfile('..','rerults','models'); % typo-tolerant fallback
         end
         mf = fullfile(modelsDir,'MLP_latest.mat');
         if exist(mf,'file')~=2
@@ -47,21 +78,19 @@ function state = step7_task1_apply_cnn(state, cfg)
         if exist(mf,'file')==2
             Smlp = load(mf);
             mlp.params    = Smlp.params;
-            mlp.classes   = Smlp.classes; if iscategorical(mlp.classes), mlp.classes=cellstr(mlp.classes); end
+            mlp.classes   = Smlp.classes; if iscategorical(mlp.classes), mlp.classes = cellstr(mlp.classes); end
             mlp.inputSize = []; if isfield(Smlp,'inputSize'), mlp.inputSize = Smlp.inputSize; end
-            mlp.mu        = []; if isfield(Smlp,'mu'),    mlp.mu=Smlp.mu; end
-            mlp.sigma     = []; if isfield(Smlp,'sigma'), mlp.sigma=Smlp.sigma; end
-            mlp.useCLAHE  = true; if isfield(Smlp,'useCLAHE'), mlp.useCLAHE=Smlp.useCLAHE; end
+            mlp.mu        = []; if isfield(Smlp,'mu'),    mlp.mu = Smlp.mu; end
+            mlp.sigma     = []; if isfield(Smlp,'sigma'), mlp.sigma = Smlp.sigma; end
+            mlp.useCLAHE  = true; if isfield(Smlp,'useCLAHE'), mlp.useCLAHE = Smlp.useCLAHE; end
             mlpAvailable  = true;
-            fprintf('[apply] 已加载 MLP 兜底: %s\n', mf);
         end
     catch
-        % 忽略加载错误
     end
 
-    % ---------------- 一次性生成 batch（白边+居中缩放，仅一次） ----------------
+    % ---- batch build (single letterbox) ----
     X = zeros(inSize(1), inSize(2), inSize(3), N, 'single');
-    inUsed = zeros(inSize(1), inSize(2), inSize(3), N, 'single'); % 实际送入网络的图
+    inUsed = zeros(inSize(1), inSize(2), inSize(3), N, 'single'); % actual network inputs
 
     outDbg = fullfile(cfg.paths.figures,'dbg_apply_cnn','cmp');
     if ~exist(outDbg,'dir'), mkdir(outDbg); end
@@ -69,66 +98,73 @@ function state = step7_task1_apply_cnn(state, cfg)
     for i = 1:N
         Ci = crops{i};
         if ~isfloat(Ci), Ci = single(Ci); end
-        Ci = max(0,min(1,Ci));
+        Ci = max(0, min(1, Ci));
 
         Iproc = preprocess_for_cnn_pad(Ci, inSize(1:2), useCLAHE, inSize(3), padScale_main);
-        X(:,:,:,i) = Iproc;
+        X(:,:,:,i)      = Iproc;
         inUsed(:,:,:,i) = Iproc;
 
         try
-            imwrite(uint8(Ci*255),   fullfile(outDbg,sprintf('step6_bin_%02d.png',i)));
-            imwrite(uint8(Iproc*255),fullfile(outDbg,sprintf('input_%02d.png',i)));
+            imwrite(uint8(Ci*255),    fullfile(outDbg, sprintf('step6_bin_%02d.png', i)));
+            imwrite(uint8(Iproc*255), fullfile(outDbg, sprintf('input_%02d.png',     i)));
         catch
         end
     end
 
-    % ---------------- CNN 预测（仅一次） ----------------
-    scores = predict(net,X);               % [N x C]
-    [conf,idx] = max(scores,[],2);
+    % ---- CNN inference ----
+    scores = predict(net, X);               % [N x C] or [N x C] depending on network
+    [conf, idx] = max(scores, [], 2);
     labels = string(classes(idx));
 
-    % ---------------- 覆盖策略：仅当 {A,H,4} 且置信<0.70，用 MLP Top-1 覆盖 ----------------
+    % ---- MLP override: only for {A,H,4} with low confidence ----
     if mlpAvailable
-        for i=1:N
+        for i = 1:N
             if conf(i) < confThr && any(labels(i) == targetSet)
-                Imlp = inUsed(:,:,1,i);      % 使用同一入网图的单通道
-                x = reshape(Imlp,[],1);
+                Imlp = inUsed(:,:,1,i);      % use the same network input (single channel)
+                x = reshape(Imlp, [], 1);
                 if ~isempty(mlp.mu) && ~isempty(mlp.sigma)
                     x = (x - mlp.mu) ./ mlp.sigma;
                 end
                 p = mlp_forward_predict_single(x, mlp.params); % C x 1
                 [pMax, pIdx] = max(p);
                 if pIdx>=1 && pIdx<=numel(mlp.classes)
-                    labels(i) = string(mlp.classes{pIdx}); % 直接采用 MLP 结果
+                    labels(i) = string(mlp.classes{pIdx});
                     conf(i)   = pMax;
                 end
             end
         end
     end
 
-    % ---------------- 网格可视化 ----------------
+    % ---- visualization ----
     try
         cols = 12; rows = ceil(N/cols);
         f = figure('Color','w','Name','CNN inputs (final)');
-        tiledlayout(rows,cols,'TileSpacing','compact','Padding','compact');
-        for i=1:N
+        tiledlayout(rows, cols, 'TileSpacing', 'compact', 'Padding', 'compact');
+        for i = 1:N
             nexttile;
             imshow(inUsed(:,:,:,i),'Border','tight');
-            title(sprintf('%s(%.2f)',labels(i),conf(i)),'FontSize',8);
+            title(sprintf('%s(%.2f)', labels(i), conf(i)), 'FontSize', 8);
         end
-        exportgraphics(f,fullfile(cfg.paths.figures,'step7_task1_cnn_inputs_grid.png'),'Resolution',150);
+        exportgraphics(f, fullfile(cfg.paths.figures,'step7_task1_cnn_inputs_grid.png'), 'Resolution', 150);
         close(f);
     catch
     end
 
-    % 回写状态
-    state.step7.task1_apply = struct('labels',labels,'scores',conf,'N',N, ...
-        'padScale',padScale_main,'source',src,'useCLAHE',useCLAHE, ...
-        'confThr',confThr,'targetSet',targetSet,'retry',false);
+    % ---- write back ----
+    state.step7.task1_apply = struct( ...
+        'labels',   labels, ...
+        'scores',   conf, ...
+        'N',        N, ...
+        'padScale', padScale_main, ...
+        'source',   src, ...
+        'useCLAHE', useCLAHE, ...
+        'confThr',  confThr, ...
+        'targetSet',targetSet, ...
+        'retry',    false );
 end
 
 % ===================================================================
-% 一次性白边+居中缩放（letterbox）
+% Single-pass letterbox (white background + centered)
 function Iout = preprocess_for_cnn_pad(I, outSz, useCLAHE, outC, padScale)
     if size(I,3)>1, I = rgb2gray(I); end
     I = im2single(I);
@@ -140,7 +176,7 @@ function Iout = preprocess_for_cnn_pad(I, outSz, useCLAHE, outC, padScale)
     nh = max(1, min(S, round(size(I,1)*s)));
     nw = max(1, min(T, round(size(I,2)*s)));
     Ir = imresize(I, [nh nw], 'nearest');
-    canvas = ones(S,T,'single');           % 白底
+    canvas = ones(S, T, 'single');      % white background
     y0 = max(1, floor((S - nh)/2) + 1);
     x0 = max(1, floor((T - nw)/2) + 1);
     y1 = min(S, y0 + nh - 1);
@@ -150,17 +186,17 @@ function Iout = preprocess_for_cnn_pad(I, outSz, useCLAHE, outC, padScale)
     if nargin<4 || outC==1
         Iout = canvas;
     else
-        Iout = repmat(canvas,[1 1 3]);
+        Iout = repmat(canvas, [1 1 3]);
     end
 end
 
 % ===================================================================
-% 单样本 MLP 前向（隐层 ReLU，输出 softmax）
+% Single-sample MLP forward (hidden ReLU, output softmax)
 function P = mlp_forward_predict_single(x, params)
 % x: D x 1
     L = numel(params.W);
     A = x;
-    for l=1:L-1
+    for l = 1:L-1
         Z = params.W{l} * A + params.b{l};
         A = max(0, Z);     % ReLU
     end

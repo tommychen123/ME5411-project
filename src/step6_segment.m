@@ -1,38 +1,39 @@
 function state = step6_segment(state, cfg)
-% STEP6_SEGMENT - Simple, toolbox-free character segmentation
-%  + Splits over-wide boxes by vertical projection to reach target count (optional)
+% STEP6_SEGMENT - Toolbox-free character segmentation
+% - Connected components with size/aspect filters
+% - Optional conservative merge
+% - Optional splitting of over-wide boxes via vertical projection valleys
 %
 % Inputs:
 %   state:
-%     state.roi         : grayscale ROI (double in [0,1]) for overlay/crops
-%     state.binarize.bw : logical ROI binary (foreground = true,通常白字黑底)
+%     state.roi         : grayscale ROI (double in [0,1])
+%     state.binarize.bw : logical ROI binary (foreground = true)
 %   cfg.segment (optional):
 %     .connectivity : '8' (default) | '4'
-%     .preCloseIters: integer >=0, 3x3 closing iterations before CC (default 0)
-%     .preErodeIters: integer >=0, 3x3 erosion iterations before CC (default 1)
+%     .preCloseIters: integer >=0, 3x3 closing iters before CC (default 0)
+%     .preErodeIters: integer >=0, 3x3 erosion iters before CC (default 1)
 %     .minAreaFrac  : min area vs ROI area (default 7e-5)
 %     .maxAreaFrac  : max area vs ROI area (default 0.12)
 %     .minHFrac     : min height vs ROI height (default 0.22)
 %     .maxHFrac     : max height vs ROI height (default 0.95)
 %     .minWHRatio   : min width/height (default 0.08)
 %     .maxWHRatio   : max width/height (default 3.0)
-%     .mergeGaps    : true/false (default false)  % conservative horizontal merge
-%     .xGapPx       : max allowed gap in px when merging (default 3)
+%     .mergeGaps    : true/false (default false)
+%     .xGapPx       : max horizontal gap (px) to merge (default 3)
 %     .yOverlapFrac : required vertical overlap [0..1] (default 0.75)
 %     .gridCols     : preview grid columns (default 12)
-%   % NEW (for splitting wide boxes)
 %     .splitWide         : true/false (default true)
-%     .splitWidthFactor  : trigger split when w > factor * median_w (default 1.35)
+%     .splitWidthFactor  : trigger split if w > factor * median_w (default 1.35)
 %     .splitMinPartFrac  : each child >= frac * median_w (default 0.45)
-%     .splitPadPx        : ignore cut within this px from box edges (default 3)
+%     .splitPadPx        : ignore cut near box edges (px, default 3)
 %     .targetK           : desired total boxes; 0/[] to disable (default 10)
 %
 % Outputs:
-%   state.segment.boxes      : Nx4 [x y w h], left->right
+%   state.segment.boxes      : Nx4 [x y w h], left→right
 %   state.segment.cropsGray  : 1xN gray crops
-%   state.segment.cropsBW    : 1xN binary crops（原始极性，通常白字黑底）
-%   state.segment.cropsBin   : 1xN binary crops（已反相为白底黑字，供CNN直接用）
-%   state.segment.bwFiltered : 最终掩膜（只保留框内前景）
+%   state.segment.cropsBW    : 1xN binary crops (original polarity)
+%   state.segment.cropsBin   : 1xN binary crops (inverted: white background, black glyph)
+%   state.segment.bwFiltered : final mask keeping only content within boxes
 %
 % Saves:
 %   step6_segment_boxes.png, step6_chars_grid.png, step6_final_bw.png
@@ -42,7 +43,7 @@ function state = step6_segment(state, cfg)
     assert(isfield(state,'roi'), 'Missing state.roi (from step3).');
 
     I  = state.roi;
-    BW = logical(state.binarize.bw);      % 前景=1（通常白字黑底）
+    BW = logical(state.binarize.bw);
     [H,W] = size(BW);
     roiArea = H*W;
 
@@ -62,19 +63,19 @@ function state = step6_segment(state, cfg)
     S = set_default(S,'xGapPx',3);
     S = set_default(S,'yOverlapFrac',0.75);
     S = set_default(S,'gridCols',12);
-    % --- new defaults for splitting
+    % splitting
     S = set_default(S,'splitWide',true);
     S = set_default(S,'splitWidthFactor',1.35);
     S = set_default(S,'splitMinPartFrac',0.45);
     S = set_default(S,'splitPadPx',3);
-    S = set_default(S,'targetK',10);  % set 0 or [] to disable target count
+    S = set_default(S,'targetK',10);
 
     % ---------- light morphology (toolbox-free) ----------
     if S.preCloseIters > 0
         BW = morph_close(BW, S.preCloseIters);   % 3x3: dilate then erode
     end
     if S.preErodeIters > 0
-        BW = morph_erode(BW, S.preErodeIters);   % 3x3 erosion to break thin bridges
+        BW = morph_erode(BW, S.preErodeIters);   % 3x3 erosion
     end
 
     % ---------- connected components (BFS) ----------
@@ -106,26 +107,26 @@ function state = step6_segment(state, cfg)
         return;
     end
 
-    % ---------- NEW: split over-wide boxes ----------
+    % ---------- split over-wide boxes ----------
     if S.splitWide
         boxes = split_overwide_boxes(BW, boxes, S);
     end
 
-    % ---------- (optional) conservative merge ----------
+    % ---------- conservative merge (optional) ----------
     if S.mergeGaps
         boxes = merge_horizontal_boxes(boxes, S.xGapPx, S.yOverlapFrac);
     end
 
-    % ---------- ensure target K by further splitting widest boxes ----------
+    % ---------- reach target K by splitting widest boxes ----------
     if ~isempty(S.targetK) && S.targetK > 0
         boxes = reach_targetK_by_splitting(BW, boxes, S.targetK, S);
     end
 
-    % ---------- left->right & crops ----------
+    % ---------- left→right & crops ----------
     [~,ord] = sort(boxes(:,1),'ascend'); boxes = boxes(ord,:);
     N = size(boxes,1);
 
-    % 构造与 Step6 一致的“最终掩膜”：仅保留框内的前景
+    % final mask keeping only pixels inside boxes
     BWfinal = false(H,W);
     for i = 1:N
         b = boxes(i,:);
@@ -133,25 +134,25 @@ function state = step6_segment(state, cfg)
         BWfinal(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1) = sub | BWfinal(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
     end
 
-    % 生成小块（两套：原始极性 + 反相为白底黑字）
-    cropsBW  = cell(1,N);  % 原始极性，通常白字黑底（前景=1）
-    cropsBin = cell(1,N);  % 已反相：白底黑字（背景=1，字=0）
+    % crops: original polarity and inverted (white background, black glyph)
+    cropsBW   = cell(1,N);
+    cropsBin  = cell(1,N);
     cropsGray = cell(1,N);
     for i = 1:N
         b = boxes(i,:);
         bin = BW(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
-        cropsBW{i}  = bin;       % 保留原始二值
-        cropsBin{i} = ~bin;      % 反相成白底黑字（给 CNN 用）
-        cropsGray{i} = I( b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
+        cropsBW{i}   = bin;
+        cropsBin{i}  = ~bin;
+        cropsGray{i} = I( b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1 );
     end
 
     % ---------- save to state ----------
     state.segment = struct( ...
         'boxes',      boxes, ...
         'cropsGray',  {cropsGray}, ...
-        'cropsBW',    {cropsBW}, ...     % 兼容：原始极性
-        'cropsBin',   {cropsBin}, ...    % ★ 白底黑字（建议CNN使用）
-        'bwFiltered',  BWfinal);         % ★ 最终掩膜（仅保留框内）
+        'cropsBW',    {cropsBW}, ...
+        'cropsBin',   {cropsBin}, ...
+        'bwFiltered',  BWfinal);
 
     % ---------- visualization ----------
     f1 = figure('Name','Step6 - Boxes','Color','w');
@@ -173,7 +174,6 @@ function state = step6_segment(state, cfg)
     safe_save_fig(f2, fullfile(cfg.paths.figures,'step6_chars_grid.png'), 150);
     close(f2);
 
-    % 额外导出 Step6 最终掩膜（便于核对 Step7 输入一致性）
     f3 = figure('Name','Step6 - Final BW','Color','w');
     imshow(BWfinal,'Border','tight'); title('Step6 Final BW (kept boxes only)');
     safe_save_fig(f3, fullfile(cfg.paths.figures,'step6_final_bw.png'), 150);
@@ -181,34 +181,31 @@ function state = step6_segment(state, cfg)
 
     fprintf('[Step6] Done. %d segments kept.\n', N);
 
-        % —— 新增：导出单个字符（白底黑字） —— 
+    % export per-character inverted crops (white bg / black glyph)
     outDir = fullfile(cfg.paths.figures, 'step6_crops_bin');
     if ~exist(outDir,'dir'), mkdir(outDir); end
     for i=1:N
-        % 255白、0黑：与 CNN 预期一致
         imwrite(uint8(cropsBin{i}*255), fullfile(outDir, sprintf('char_%02d.png', i)));
     end
-
 end
 
 % ================= helpers =================
 function S = set_default(S, f, v)
-% local helper: if field missing or empty, set default
     if ~isfield(S, f) || isempty(S.(f)), S.(f) = v; end
 end
 
 function B = morph_close(B, iters)
-% 3x3 形态学闭运算（先膨胀再腐蚀），toolbox-free
+% 3x3 closing: dilate then erode (toolbox-free)
     B = logical(B);
     for t = 1:max(1, round(iters))
-        D = conv2(double(B), ones(3), 'same') > 0;    % 膨胀
-        B = conv2(double(D), ones(3), 'same') == 9;   % 腐蚀
+        D = conv2(double(B), ones(3), 'same') > 0;
+        B = conv2(double(D), ones(3), 'same') == 9;
     end
     B = logical(B);
 end
 
 function B = morph_erode(B, iters)
-% 3x3 形态学腐蚀，toolbox-free
+% 3x3 erosion (toolbox-free)
     B = logical(B);
     for t = 1:max(1, round(iters))
         B = conv2(double(B), ones(3), 'same') == 9;
@@ -217,7 +214,7 @@ function B = morph_erode(B, iters)
 end
 
 function [labels, stats] = label_cc(BW, neigh)
-% BFS 连通域标记，返回 labels 与 stats(area, bbox)
+% BFS connected components; returns labels and stats(area, bbox)
     [H,W] = size(BW);
     labels = zeros(H,W,'uint32');
     visited = false(H,W);
@@ -327,10 +324,8 @@ function boxes = split_overwide_boxes(BW, boxes, S)
             out = [out; b]; %#ok<AGROW>
             continue;
         end
-        % try to split by valley; if fails, bisect
         parts = split_box_once(BW, b, pad, minChildW);
         if isempty(parts)
-            % fallback: uniform split in half, respecting min width
             cut = round(b(3)/2);
             if cut >= minChildW && (b(3)-cut) >= minChildW
                 left  = [b(1), b(2), cut,        b(4)];
@@ -351,8 +346,8 @@ function parts = split_box_once(BW, b, pad, minChildW)
     parts = [];
     sub = BW(b(2):b(2)+b(4)-1, b(1):b(1)+b(3)-1);
     [~, Ws] = size(sub);
-    col = sum(sub, 1);                      % foreground count per column
-    win = max(3, round(0.06 * Ws));         % smoothing window ~6% width
+    col = sum(sub, 1);
+    win = max(3, round(0.06 * Ws)); % ~6% width
     k = ones(1,win)/win;
     colS = conv(col, k, 'same');
 
@@ -360,11 +355,11 @@ function parts = split_box_once(BW, b, pad, minChildW)
     R = min(Ws-1, Ws-pad);
     if L >= R, return; end
 
-    [~, idx] = min(colS(L:R));              % valley index (relative)
+    [~, idx] = min(colS(L:R));
     cut = L + idx - 1;
 
     if (cut < minChildW) || (Ws - cut) < minChildW
-        return; % not safe to split
+        return;
     end
     left  = [b(1),      b(2), cut,        b(4)];
     right = [b(1)+cut,  b(2), b(3)-cut,   b(4)];
@@ -372,27 +367,24 @@ function parts = split_box_once(BW, b, pad, minChildW)
 end
 
 function boxes = reach_targetK_by_splitting(BW, boxes, K, S)
-% Keep splitting the widest box until we reach K (or cannot split safely)
+% Split the widest box until we reach K or cannot split safely
     iters = 0; maxiters = 50;
     while size(boxes,1) < K && iters < maxiters
         iters = iters + 1;
-        % pick widest box
         [~, idx] = max(boxes(:,3));
         b = boxes(idx,:);
-        % attempt splitting
         parts = split_box_once(BW, b, max(1,round(S.splitPadPx)), ...
                                    max(6,round(S.splitMinPartFrac*median(boxes(:,3)))));
         if isempty(parts)
-            % fallback uniform if possible
             cut = round(b(3)/2);
             if cut >= 6 && (b(3)-cut) >= 6
                 parts = [ b(1),      b(2), cut,        b(4);
                           b(1)+cut,  b(2), b(3)-cut,   b(4) ];
             else
-                break; % cannot split further
+                break;
             end
         end
-        boxes(idx,:) = [];           % remove old
-        boxes = [boxes; parts];      % add children
+        boxes(idx,:) = [];
+        boxes = [boxes; parts];
     end
 end

@@ -15,10 +15,10 @@ function state = step5_outline(state, cfg)
     if strcmpi(cfg.outline.connectivity,'4')
         K = [0 1 0; 1 1 1; 0 1 0];
         N = conv2(double(BW), K, 'same');
-        perim = BW & (N < 5);    % center+4邻都为1才是内部；否则是边界
+        perim = BW & (N < 5); 
     else
         N = conv2(double(BW), ones(3), 'same');
-        perim = BW & (N < 9);    % center+8邻都为1才是内部；否则是边界
+        perim = BW & (N < 9); 
     end
 
     state.outline = struct();
