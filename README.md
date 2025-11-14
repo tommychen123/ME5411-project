@@ -20,7 +20,7 @@ src/
 ├── step6_segment.m            # Character segmentation (outputs cropsBin)
 │
 ├── step7_dataset.m            # Dataset preparation for CNN/MLP
-├── step7_cnn.m                # CNN model training (older version)
+├── step7_cnn.m                # CNN model training
 ├── step7_task1_cnn.m          # Improved CNN model definition & training
 ├── step7_task1_apply_cnn.m    # CNN inference (auto retry, MLP assistance for low confidence)
 │
@@ -51,8 +51,6 @@ src/
 ## 🧩 Requirements
 
 - MATLAB R2021a or later
-- Deep Learning Toolbox (for CNN part)
-- No toolbox required for MLP
 - (Optional) GPU support for faster CNN training
 
 ---
@@ -86,7 +84,7 @@ main
 
 ### B. CNN Training
 ```matlab
-step7_task1_cnn
+step7_cnn
 ```
 
 ### C. CNN Inference
@@ -115,10 +113,7 @@ state = step7_task2_apply_mlp(state, cfg);
 │   └── MLP_latest.mat
 │
 ├── figures/
-│   ├── step7_task1_cnn_inputs_grid.png
-│   └── step7_task2_mlp_inputs_grid.png
-│
-└── step7_task1_cnn_preds.csv
+
 ```
 
 ---
@@ -146,9 +141,4 @@ For each segmented character:
 Output final label (from best result)
 ```
 
----
 
-## 📜 License
-
-MIT License © 2025  
-Developed by CGXX with ChatGPT assistance.
